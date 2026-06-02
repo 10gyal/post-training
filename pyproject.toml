@@ -7,5 +7,6 @@ requires-python = ">=3.13"
 dependencies = [
     "accelerate>=1.13.0",
     "datasets>=4.8.5",
+    "pydantic>=2.13.4",
     "transformers>=5.9.0",
 ]
