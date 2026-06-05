@@ -1,0 +1,29 @@
+model:
+  pretrained_lm: HuggingFaceTB/SmolLM2-135M # openai-community/gpt2
+  # The base model does not include a chat template. For Seb's dataset leave the following empty
+  chat_template_tokenizer: HuggingFaceTB/SmolLM2-135M-Instruct
+
+data:
+  ift_dataset: HuggingFaceTB/smoltalk
+  dataset_subset: everyday-conversations
+  dataset_split: train
+  max_length: 1024
+
+  # Seb Raschka's IFT dataset - Shorter and sweeter
+  use_local_instruction_data: false
+  instruction_data_path: instruction-data.json
+  instruction_data_url: https://raw.githubusercontent.com/rasbt/LLMs-from-scratch/main/ch07/01_main-chapter-code/instruction-data.json
+
+training:
+  lr: 5.0e-5
+  num_epochs: 2
+  batch_size: 8
+  warmup_ratio: 0.1
+  weight_decay: 0.0
+  max_grad_norm: 1.0
+  seed: 42
+
+hardware:
+  device: auto
+  bf16: true
+  model_device_id: 0
