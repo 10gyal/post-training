@@ -51,13 +51,15 @@ def load_model(cfg, device: torch.device | str | None = None):
         else device
     )
     tokenizer = AutoTokenizer.from_pretrained(
-        cfg.model.pretrained_lm, trust_remote_code=False
+        cfg.model.pretrained_lm, trust_remote_code=False, use_fast=True
     )
 
     if tokenizer.chat_template is None:
         if cfg.model.chat_template_tokenizer:
             donor = AutoTokenizer.from_pretrained(
-                cfg.model.chat_template_tokenizer, trust_remote_code=False
+                cfg.model.chat_template_tokenizer,
+                trust_remote_code=False,
+                use_fast=True,
             )
             tokenizer.chat_template = donor.chat_template
 
