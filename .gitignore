@@ -6,6 +6,14 @@ dist/
 wheels/
 *.egg-info
 
+
+.ruff_cache
+.vscode
+
 # Virtual environments
 .venv
 *.json
+
+
+.env
+wandb

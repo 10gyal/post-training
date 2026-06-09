@@ -10,7 +10,7 @@ from rich.progress import (
     TimeElapsedColumn,
 )
 from torch.utils.data import DataLoader
-from transformers import AutoModel, AutoTokenizer
+from transformers import AutoModel
 
 from utils import load_config, load_tokenizer, prepare_dataset, collate_fn
 
@@ -74,6 +74,16 @@ class BTModel(BaseRM):
 def main():
 
     cfg = load_config("config.yaml")
+    wandb = None
+    if cfg.use_wandb:
+        import wandb
+
+        wandb.init(
+            project=cfg.wandb_project,
+            name=cfg.wandb_run_name,
+            mode=cfg.wandb_mode,
+            config=cfg.model_dump(),
+        )
 
     base_model = cfg.base_model
     dataset_name = cfg.dataset_name
@@ -106,6 +116,7 @@ def main():
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
 
     model.train()
+    global_step = 0
 
     for epoch in range(epochs):
         with Progress(
@@ -143,6 +154,38 @@ def main():
                     chosen=f"{r_chosen.detach().float().mean().item():.4f}",
                     rejected=f"{r_rejected.detach().float().mean().item():.4f}",
                 )
+
+                if wandb is not None and global_step % cfg.log_every == 0:
+                    reward_margin = r_chosen - r_rejected
+                    wandb.log(
+                        {
+                            "train/loss": loss.detach().item(),
+                            "train/reward_chosen": r_chosen.detach()
+                            .float()
+                            .mean()
+                            .item(),
+                            "train/reward_rejected": r_rejected.detach()
+                            .float()
+                            .mean()
+                            .item(),
+                            "train/reward_margin": reward_margin.detach()
+                            .float()
+                            .mean()
+                            .item(),
+                            "train/preference_accuracy": (reward_margin > 0)
+                            .detach()
+                            .float()
+                            .mean()
+                            .item(),
+                            "train/lr": optimizer.param_groups[0]["lr"],
+                            "train/epoch": epoch + 1,
+                        },
+                        step=global_step,
+                    )
+                global_step += 1
+
+    if wandb is not None:
+        wandb.finish()
 
 
 main()

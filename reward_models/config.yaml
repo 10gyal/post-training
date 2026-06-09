@@ -1,8 +1,12 @@
 base_model: "openai-community/gpt2"
 dataset_name: "argilla/ultrafeedback-binarized-preferences-cleaned"
-limit: 6
+limit: 10
 max_length: 1024
 batch_size: 2
 lr: 5e-3
-epochs: 10
-
+epochs: 2
+use_wandb: true
+wandb_project: "pref_rm"
+wandb_run_name: null
+wandb_mode: "online"
+log_every: 1

@@ -9,3 +9,8 @@ class Config(BaseModel):
     batch_size: int
     lr: float
     epochs: int
+    use_wandb: bool = False
+    wandb_project: str = "learn-rlhf"
+    wandb_run_name: str | None = None
+    wandb_mode: str = "online"
+    log_every: int = 1
