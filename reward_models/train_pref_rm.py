@@ -93,7 +93,7 @@ def main():
     lr = cfg.lr
     epochs = cfg.epochs
 
-    device = "mps"
+    device = "cuda" if torch.cuda.is_available() else "mps"
 
     tokenizer = load_tokenizer(base_model)
 
