@@ -1,7 +1,9 @@
+from typing import Any
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from rich.console import Console
+from rich.panel import Panel
 from rich.progress import (
     BarColumn,
     Progress,
@@ -9,8 +11,9 @@ from rich.progress import (
     TextColumn,
     TimeElapsedColumn,
 )
-from torch.utils.data import DataLoader
-from transformers import AutoModel, get_cosine_schedule_with_warmup
+from rich.table import Table
+from torch.utils.data import DataLoader, dataset
+from transformers import AutoModel, AutoTokenizer, get_cosine_schedule_with_warmup
 
 from utils import load_config, load_tokenizer, prepare_dataset, collate_fn
 
@@ -71,6 +74,64 @@ class BTModel(BaseRM):
         return loss, r_chosen, r_rejected
 
 
+def eval(model: BTModel, dloader: DataLoader) -> dict[str, float]:
+    """Measure preference accuracy and reward statistics on a test split."""
+    device = next(model.parameters()).device
+
+    correct, total = 0, 0
+    chosen_sum, rejected_sum, margin_sum = 0.0, 0.0, 0.0
+    with torch.no_grad():
+        for batch in dloader:
+            batch = {k: v.to(device) for k, v in batch.items()}
+            _, r_chosen, r_rejected = model(**batch)
+            chosen = r_chosen.detach().float()
+            rejected = r_rejected.detach().float()
+            margin = chosen - rejected
+
+            correct += (margin > 0).sum().item()
+            batch_size = chosen.size(0)
+            total += batch_size
+            chosen_sum += chosen.sum().item()
+            rejected_sum += rejected.sum().item()
+            margin_sum += margin.sum().item()
+
+    if total == 0:
+        return {
+            "accuracy": float("nan"),
+            "chosen_reward": float("nan"),
+            "rejected_reward": float("nan"),
+            "reward_margin": float("nan"),
+        }
+
+    return {
+        "accuracy": correct / total,
+        "chosen_reward": chosen_sum / total,
+        "rejected_reward": rejected_sum / total,
+        "reward_margin": margin_sum / total,
+    }
+
+
+def print_eval_metrics(metrics: dict[str, float]) -> None:
+    table = Table.grid(padding=(0, 2))
+    table.add_column(style="bold")
+    table.add_column(justify="right")
+
+    accuracy = metrics["accuracy"]
+    if accuracy == accuracy:
+        table.add_row("Preference accuracy", f"[bold green]{accuracy:.2%}[/bold green]")
+        table.add_row("Mean chosen reward", f"{metrics['chosen_reward']:.4f}")
+        table.add_row("Mean rejected reward", f"{metrics['rejected_reward']:.4f}")
+        table.add_row("Mean margin", f"{metrics['reward_margin']:+.4f}")
+    else:
+        table.add_row("Preference accuracy", "[bold yellow]n/a[/bold yellow]")
+        table.add_row("Mean chosen reward", "nan")
+        table.add_row("Mean rejected reward", "nan")
+        table.add_row("Mean margin", "nan")
+
+    console.print()
+    console.print(Panel(table, title="Evaluation", border_style="green"))
+
+
 def main():
 
     cfg = load_config("config.yaml")
@@ -98,13 +159,15 @@ def main():
 
     tokenizer = load_tokenizer(base_model)
 
-    ds = prepare_dataset(dataset_name, tokenizer, max_length, limit)
-    console.print(f"[bold]Dataset Size:[/bold] {len(ds)}")
+    train_ds, test_ds = prepare_dataset(
+        dataset_name, tokenizer, max_length, limit, split="train"
+    )
+    console.print(f"[bold]Dataset Size:[/bold] {len(train_ds)}")
     loader = DataLoader(
-        ds,
+        train_ds,
         batch_size=batch_size,
         shuffle=True,
-        drop_last=len(ds) > batch_size,
+        drop_last=len(train_ds) > batch_size,
         collate_fn=lambda b: collate_fn(b, tokenizer),
     )
 
@@ -196,6 +259,18 @@ def main():
 
     if wandb is not None:
         wandb.finish()
+
+    dloader = DataLoader(
+        test_ds,
+        batch_size=batch_size,
+        shuffle=True,
+        drop_last=len(test_ds) > batch_size,
+        collate_fn=lambda b: collate_fn(b, tokenizer),
+    )
+
+    metrics = eval(model, dloader)
+
+    print_eval_metrics(metrics)
 
 
 main()

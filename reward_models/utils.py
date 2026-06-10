@@ -1,5 +1,6 @@
 from pathlib import Path
 import yaml
+import random
 
 import torch
 from datasets import Dataset, load_dataset
@@ -30,10 +31,14 @@ def format_record(record):
 
 
 def prepare_dataset(
-    dataset_name, tokenizer: AutoTokenizer, max_length, limit=10
+    dataset_name,
+    tokenizer: AutoTokenizer,
+    max_length,
+    limit=10,
+    split="train",
 ) -> Dataset:
     """dictionary of tokenized chosen and rejected records"""
-    ds = load_dataset(dataset_name, split="train")
+    ds = load_dataset(dataset_name, split=split)
 
     ds = ds.select(range(limit))
 
@@ -72,7 +77,19 @@ def prepare_dataset(
                 "rejected_mask": rejected["attention_mask"],
             }
         )
-    return Dataset.from_list(records)
+    # Split records into train/test datasets with 0.2 ratio and return both
+
+    random.seed(42)
+    indices = list(range(len(records)))
+    random.shuffle(indices)
+    split_idx = int(len(indices) * 0.8)
+    train_indices = indices[:split_idx]
+    test_indices = indices[split_idx:]
+
+    train_records = [records[i] for i in train_indices]
+    test_records = [records[i] for i in test_indices]
+
+    return Dataset.from_list(train_records), Dataset.from_list(test_records)
 
 
 def collate_fn(batch, tokenizer: AutoTokenizer):
