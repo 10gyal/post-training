@@ -191,7 +191,6 @@ def main():
 
     model.train()
     global_step = 0
-    ema_loss = None
     num_train_batches = len(loader)
     final_accum_steps = num_train_batches % grad_accum_steps or grad_accum_steps
     optimizer.zero_grad()
@@ -203,7 +202,6 @@ def main():
             TaskProgressColumn(),
             TimeElapsedColumn(),
             TextColumn("loss={task.fields[loss]}"),
-            TextColumn("ema={task.fields[ema_loss]}"),
             TextColumn("chosen={task.fields[chosen]}"),
             TextColumn("rejected={task.fields[rejected]}"),
             console=console,
@@ -212,7 +210,6 @@ def main():
                 f"Epoch {epoch + 1}/{epochs}",
                 total=len(loader),
                 loss="n/a",
-                ema_loss="n/a",
                 chosen="n/a",
                 rejected="n/a",
             )
@@ -222,14 +219,6 @@ def main():
 
                 loss, r_chosen, r_rejected = model(**batch)
                 loss_item = loss.detach().item()
-                ema_loss = (
-                    loss_item
-                    if ema_loss is None
-                    else (
-                        cfg.loss_ema_beta * ema_loss
-                        + (1 - cfg.loss_ema_beta) * loss_item
-                    )
-                )
 
                 accum_divisor = (
                     final_accum_steps
@@ -251,7 +240,6 @@ def main():
                     task,
                     advance=1,
                     loss=f"{loss_item:.4f}",
-                    ema_loss=f"{ema_loss:.4f}",
                     chosen=f"{r_chosen.detach().float().mean().item():.4f}",
                     rejected=f"{r_rejected.detach().float().mean().item():.4f}",
                 )
@@ -264,7 +252,6 @@ def main():
                     wandb.log(
                         {
                             "train/loss": loss_item,
-                            "train/loss_ema": ema_loss,
                             "train/reward_chosen": r_chosen.detach()
                             .float()
                             .mean()

@@ -8,7 +8,6 @@ epochs: 1
 warmup_ratio: 0.1
 grad_accum_steps: 4
 max_grad_norm: 1.0
-loss_ema_beta: 0.95
 use_wandb: false
 wandb_project: "pref_rm"
 wandb_run_name: null
