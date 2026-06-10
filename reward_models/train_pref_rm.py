@@ -10,7 +10,7 @@ from rich.progress import (
     TimeElapsedColumn,
 )
 from torch.utils.data import DataLoader
-from transformers import AutoModel
+from transformers import AutoModel, get_cosine_schedule_with_warmup
 
 from utils import load_config, load_tokenizer, prepare_dataset, collate_fn
 
@@ -92,6 +92,7 @@ def main():
     batch_size = cfg.batch_size
     lr = cfg.lr
     epochs = cfg.epochs
+    warmup_ratio = cfg.warmup_ratio
 
     device = "cuda" if torch.cuda.is_available() else "mps"
 
@@ -114,6 +115,14 @@ def main():
     )
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
+
+    total_steps = max(1, len(loader) * epochs)
+    warmup_steps = int(total_steps * warmup_ratio)
+    scheduler = get_cosine_schedule_with_warmup(
+        optimizer,
+        num_warmup_steps=warmup_steps,
+        num_training_steps=total_steps,
+    )
 
     model.train()
     global_step = 0
@@ -145,6 +154,7 @@ def main():
                 loss.backward()
 
                 optimizer.step()
+                scheduler.step()
                 optimizer.zero_grad()
 
                 progress.update(

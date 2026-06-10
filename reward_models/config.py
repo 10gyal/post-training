@@ -9,6 +9,7 @@ class Config(BaseModel):
     batch_size: int
     lr: float
     epochs: int
+    warmup_ratio: float
     use_wandb: bool = False
     wandb_project: str = "learn-rlhf"
     wandb_run_name: str | None = None

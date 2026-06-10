@@ -1,10 +1,11 @@
-base_model: "openai-community/gpt2"
+base_model: "Qwen/Qwen3-0.6B-Base"
 dataset_name: "argilla/ultrafeedback-binarized-preferences-cleaned"
-limit: 10
-max_length: 1024
-batch_size: 2
-lr: 5e-3
-epochs: 2
+limit: 5000
+max_length: 512
+batch_size: 8
+lr: 5e-5
+epochs: 1
+warmup_ratio: 0.1
 use_wandb: true
 wandb_project: "pref_rm"
 wandb_run_name: null
