@@ -1,4 +1,5 @@
 from typing import Any
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -154,6 +155,7 @@ def main():
     lr = cfg.lr
     epochs = cfg.epochs
     warmup_ratio = cfg.warmup_ratio
+    grad_accum_steps = max(1, cfg.grad_accum_steps)
 
     device = "cuda" if torch.cuda.is_available() else "mps"
 
@@ -179,7 +181,7 @@ def main():
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
 
-    total_steps = max(1, len(loader) * epochs)
+    total_steps = max(1, math.ceil(len(loader) / grad_accum_steps) * epochs)
     warmup_steps = int(total_steps * warmup_ratio)
     scheduler = get_cosine_schedule_with_warmup(
         optimizer,
@@ -189,6 +191,10 @@ def main():
 
     model.train()
     global_step = 0
+    ema_loss = None
+    num_train_batches = len(loader)
+    final_accum_steps = num_train_batches % grad_accum_steps or grad_accum_steps
+    optimizer.zero_grad()
 
     for epoch in range(epochs):
         with Progress(
@@ -197,6 +203,7 @@ def main():
             TaskProgressColumn(),
             TimeElapsedColumn(),
             TextColumn("loss={task.fields[loss]}"),
+            TextColumn("ema={task.fields[ema_loss]}"),
             TextColumn("chosen={task.fields[chosen]}"),
             TextColumn("rejected={task.fields[rejected]}"),
             console=console,
@@ -205,34 +212,59 @@ def main():
                 f"Epoch {epoch + 1}/{epochs}",
                 total=len(loader),
                 loss="n/a",
+                ema_loss="n/a",
                 chosen="n/a",
                 rejected="n/a",
             )
 
-            for batch in loader:
+            for batch_idx, batch in enumerate(loader, start=1):
                 batch = {k: v.to(device) for k, v in batch.items()}
 
                 loss, r_chosen, r_rejected = model(**batch)
+                loss_item = loss.detach().item()
+                ema_loss = (
+                    loss_item
+                    if ema_loss is None
+                    else (
+                        cfg.loss_ema_beta * ema_loss
+                        + (1 - cfg.loss_ema_beta) * loss_item
+                    )
+                )
 
-                loss.backward()
+                accum_divisor = (
+                    final_accum_steps
+                    if batch_idx > num_train_batches - final_accum_steps
+                    else grad_accum_steps
+                )
+                (loss / accum_divisor).backward()
 
-                optimizer.step()
-                scheduler.step()
-                optimizer.zero_grad()
+                should_step = (
+                    batch_idx % grad_accum_steps == 0 or batch_idx == num_train_batches
+                )
+                if should_step:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.max_grad_norm)
+                    optimizer.step()
+                    scheduler.step()
+                    optimizer.zero_grad()
 
                 progress.update(
                     task,
                     advance=1,
-                    loss=f"{loss.detach().item():.4f}",
+                    loss=f"{loss_item:.4f}",
+                    ema_loss=f"{ema_loss:.4f}",
                     chosen=f"{r_chosen.detach().float().mean().item():.4f}",
                     rejected=f"{r_rejected.detach().float().mean().item():.4f}",
                 )
 
                 if wandb is not None and global_step % cfg.log_every == 0:
                     reward_margin = r_chosen - r_rejected
+                    train_accuracy = (
+                        (reward_margin > 0).detach().float().mean().item()
+                    )
                     wandb.log(
                         {
-                            "train/loss": loss.detach().item(),
+                            "train/loss": loss_item,
+                            "train/loss_ema": ema_loss,
                             "train/reward_chosen": r_chosen.detach()
                             .float()
                             .mean()
@@ -245,20 +277,14 @@ def main():
                             .float()
                             .mean()
                             .item(),
-                            "train/preference_accuracy": (reward_margin > 0)
-                            .detach()
-                            .float()
-                            .mean()
-                            .item(),
+                            "train/accuracy": train_accuracy,
+                            "train/preference_accuracy": train_accuracy,
                             "train/lr": optimizer.param_groups[0]["lr"],
                             "train/epoch": epoch + 1,
                         },
                         step=global_step,
                     )
                 global_step += 1
-
-    if wandb is not None:
-        wandb.finish()
 
     dloader = DataLoader(
         test_ds,
@@ -269,6 +295,17 @@ def main():
     )
 
     metrics = eval(model, dloader)
+    if wandb is not None:
+        wandb.log(
+            {
+                "eval/accuracy": metrics["accuracy"],
+                "eval/chosen_reward": metrics["chosen_reward"],
+                "eval/rejected_reward": metrics["rejected_reward"],
+                "eval/reward_margin": metrics["reward_margin"],
+            },
+            step=global_step,
+        )
+        wandb.finish()
 
     print_eval_metrics(metrics)
 
