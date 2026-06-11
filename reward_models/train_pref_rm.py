@@ -214,11 +214,27 @@ def main():
                 rejected="n/a",
             )
 
+            accum_loss = 0.0
+            accum_chosen_reward = 0.0
+            accum_rejected_reward = 0.0
+            accum_reward_margin = 0.0
+            accum_accuracy = 0.0
+            accum_batches = 0
+
             for batch_idx, batch in enumerate(loader, start=1):
                 batch = {k: v.to(device) for k, v in batch.items()}
 
                 loss, r_chosen, r_rejected = model(**batch)
                 loss_item = loss.detach().item()
+                reward_margin = r_chosen - r_rejected
+                train_accuracy = (reward_margin > 0).detach().float().mean().item()
+
+                accum_loss += loss_item
+                accum_chosen_reward += r_chosen.detach().float().mean().item()
+                accum_rejected_reward += r_rejected.detach().float().mean().item()
+                accum_reward_margin += reward_margin.detach().float().mean().item()
+                accum_accuracy += train_accuracy
+                accum_batches += 1
 
                 accum_divisor = (
                     final_accum_steps
@@ -231,10 +247,39 @@ def main():
                     batch_idx % grad_accum_steps == 0 or batch_idx == num_train_batches
                 )
                 if should_step:
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.max_grad_norm)
+                    torch.nn.utils.clip_grad_norm_(
+                        model.parameters(), cfg.max_grad_norm
+                    )
                     optimizer.step()
                     scheduler.step()
                     optimizer.zero_grad()
+
+                    if wandb is not None and global_step % cfg.log_every == 0:
+                        wandb.log(
+                            {
+                                "train/loss": accum_loss / accum_batches,
+                                "train/reward_chosen": accum_chosen_reward
+                                / accum_batches,
+                                "train/reward_rejected": accum_rejected_reward
+                                / accum_batches,
+                                "train/reward_margin": accum_reward_margin
+                                / accum_batches,
+                                "train/accuracy": accum_accuracy / accum_batches,
+                                "train/preference_accuracy": accum_accuracy
+                                / accum_batches,
+                                "train/lr": optimizer.param_groups[0]["lr"],
+                                "train/epoch": epoch + 1,
+                            },
+                            step=global_step,
+                        )
+
+                    accum_loss = 0.0
+                    accum_chosen_reward = 0.0
+                    accum_rejected_reward = 0.0
+                    accum_reward_margin = 0.0
+                    accum_accuracy = 0.0
+                    accum_batches = 0
+                    global_step += 1
 
                 progress.update(
                     task,
@@ -243,35 +288,6 @@ def main():
                     chosen=f"{r_chosen.detach().float().mean().item():.4f}",
                     rejected=f"{r_rejected.detach().float().mean().item():.4f}",
                 )
-
-                if wandb is not None and global_step % cfg.log_every == 0:
-                    reward_margin = r_chosen - r_rejected
-                    train_accuracy = (
-                        (reward_margin > 0).detach().float().mean().item()
-                    )
-                    wandb.log(
-                        {
-                            "train/loss": loss_item,
-                            "train/reward_chosen": r_chosen.detach()
-                            .float()
-                            .mean()
-                            .item(),
-                            "train/reward_rejected": r_rejected.detach()
-                            .float()
-                            .mean()
-                            .item(),
-                            "train/reward_margin": reward_margin.detach()
-                            .float()
-                            .mean()
-                            .item(),
-                            "train/accuracy": train_accuracy,
-                            "train/preference_accuracy": train_accuracy,
-                            "train/lr": optimizer.param_groups[0]["lr"],
-                            "train/epoch": epoch + 1,
-                        },
-                        step=global_step,
-                    )
-                global_step += 1
 
     dloader = DataLoader(
         test_ds,
