@@ -1,7 +1,8 @@
-from typing import Any
 import math
+import sys
+from pathlib import Path
+
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 from rich.console import Console
 from rich.panel import Panel
@@ -13,42 +14,21 @@ from rich.progress import (
     TimeElapsedColumn,
 )
 from rich.table import Table
-from torch.utils.data import DataLoader, dataset
-from transformers import AutoModel, AutoTokenizer, get_cosine_schedule_with_warmup
+from torch.utils.data import DataLoader
+from transformers import get_cosine_schedule_with_warmup
 
-from utils import load_config, load_tokenizer, prepare_dataset, collate_fn
+if __package__ is None or __package__ == "":
+    sys.path.append(str(Path(__file__).resolve().parents[2]))
+
+from reward_models.base_rm import BaseRM  # noqa: E402
+from reward_models.preference_rm.utils import (  # noqa: E402
+    collate_fn,
+    load_config,
+    load_tokenizer,
+    prepare_dataset,
+)
 
 console = Console()
-
-
-class BaseRM(nn.Module):
-    def __init__(self, model_name, head_dim: int = 1) -> None:
-        super().__init__()
-
-        device_map = {"": 0} if torch.cuda.is_available() else None
-        self.model = AutoModel.from_pretrained(
-            model_name, dtype="bfloat16", device_map=device_map, trust_remote_code=True
-        )
-        self.model.use_cache = False
-
-        self.head = self._build_head(self.model.config.hidden_size, head_dim)
-        self.head = self.head.to(torch.bfloat16)
-
-    def _build_head(self, hidden_size, output_dim):
-        return nn.Linear(hidden_size, output_dim, bias=output_dim > 1)
-
-    def get_hidden_states(self, input_ids: torch.Tensor, attention_mask: torch.Tensor):
-        outputs = self.model(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            output_hidden_states=True,
-            use_cache=False,
-            return_dict=True,
-        )
-        return outputs.hidden_states[-1]
-
-    def count_trainable_params(self) -> int:
-        return sum(p.numel() for p in self.parameters() if p.requires_grad)
 
 
 class BTModel(BaseRM):
@@ -135,7 +115,7 @@ def print_eval_metrics(metrics: dict[str, float]) -> None:
 
 def main():
 
-    cfg = load_config("config.yaml")
+    cfg = load_config(Path(__file__).with_name("config.yaml"))
     wandb = None
     if cfg.use_wandb:
         import wandb
@@ -313,4 +293,5 @@ def main():
     print_eval_metrics(metrics)
 
 
-main()
+if __name__ == "__main__":
+    main()

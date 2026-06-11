@@ -6,7 +6,7 @@ import torch
 from datasets import Dataset, load_dataset
 from transformers import AutoTokenizer
 
-from config import Config
+from reward_models.preference_rm.config import Config
 
 
 def load_config(path: Path) -> "Config":
@@ -26,7 +26,7 @@ def load_tokenizer(model_id: str) -> AutoTokenizer:
 def format_record(record):
     formatted_record = []
     for r in record:
-        formatted_record.append(f"{r["role"]}: {r["content"]}\n")
+        formatted_record.append(f"{r['role']}: {r['content']}\n")
     return "\n".join(formatted_record)
 
 
