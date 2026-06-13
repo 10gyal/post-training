@@ -1,6 +1,6 @@
 base_model: "Qwen/Qwen3-0.6B-Base" # "openai-community/gpt2" 
 dataset_name: "argilla/ultrafeedback-binarized-preferences-cleaned"
-limit: 2
+limit: 2000
 max_length: 1024
 batch_size: 2
 lr: 5e-5
@@ -9,7 +9,7 @@ warmup_ratio: 0.1
 grad_accum_steps: 16
 max_grad_norm: 1.0
 evaluate_on_reward_bench: true
-reward_bench_subset: "Precise IF"
+reward_bench_subset: "Safety"
 use_wandb: true
 wandb_project: "pref_rm"
 wandb_run_name: null

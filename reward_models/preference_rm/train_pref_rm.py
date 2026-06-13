@@ -33,6 +33,25 @@ from reward_models.preference_rm.utils import (  # noqa: E402
 console = Console()
 
 
+def iter_with_progress(dloader: DataLoader, description: str):
+    try:
+        total = len(dloader)
+    except TypeError:
+        total = None
+
+    with Progress(
+        TextColumn("[bold blue]{task.description}"),
+        BarColumn(),
+        TaskProgressColumn(),
+        TimeElapsedColumn(),
+        console=console,
+    ) as progress:
+        task = progress.add_task(description, total=total)
+        for batch in dloader:
+            yield batch
+            progress.update(task, advance=1)
+
+
 class BTModel(BaseRM):
     def __init__(self, model_name, head_dim: int = 1) -> None:
         super().__init__(model_name, head_dim)
@@ -63,8 +82,9 @@ def eval(model: BTModel, dloader: DataLoader) -> dict[str, float]:
 
     correct, total = 0, 0
     chosen_sum, rejected_sum, margin_sum = 0.0, 0.0, 0.0
+    model.eval()
     with torch.no_grad():
-        for batch in dloader:
+        for batch in iter_with_progress(dloader, "Preference eval"):
             batch = {k: v.to(device) for k, v in batch.items()}
             _, r_chosen, r_rejected = model(**batch)
             chosen = r_chosen.detach().float()
@@ -104,7 +124,7 @@ def eval_reward_bench(model: BTModel, dloader: DataLoader) -> dict[str, float]:
 
     model.eval()
     with torch.no_grad():
-        for batch in dloader:
+        for batch in iter_with_progress(dloader, "RewardBench eval"):
             ids = batch["candidate_ids"].to(device)
             masks = batch["candidate_masks"].to(device)
             num_correct = batch["num_correct"]
