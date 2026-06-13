@@ -125,6 +125,7 @@ def prepare_dataset(
 def prepare_reward_bench_dataset(
     tokenizer: AutoTokenizer, subset: str | None = None, max_length: int = 1024
 ) -> Dataset:
+    """Prepare RewardBench 2 as one grouped row per prompt."""
     ds = load_dataset("allenai/reward-bench-2", split="test")
     if subset:
         ds = ds.filter(lambda ex: ex["subset"] == subset)
@@ -132,34 +133,30 @@ def prepare_reward_bench_dataset(
     records = []
     for row in ds:
         prompt = row["prompt"]
-        chosen = row["chosen"][-1]
-        rejects = row["rejected"]
+        candidates = list(row["chosen"]) + list(row["rejected"])
+        candidate_ids = []
+        candidate_masks = []
 
-        chosen_record = prompt_response_to_messages(prompt, chosen)
-        chosen_tokenized = tokenize_record(
-            chosen_record,
-            tokenizer,
-            max_length,
-            fallback_text=format_prompt_response(prompt, chosen),
-        )
-
-        for r in rejects:
-            rejected_record = prompt_response_to_messages(prompt, r)
-            reject_tokenized = tokenize_record(
-                rejected_record,
+        for response in candidates:
+            candidate_record = prompt_response_to_messages(prompt, response)
+            candidate_tokenized = tokenize_record(
+                candidate_record,
                 tokenizer,
                 max_length=max_length,
-                fallback_text=format_prompt_response(prompt, r),
+                fallback_text=format_prompt_response(prompt, response),
             )
+            candidate_ids.append(candidate_tokenized["input_ids"])
+            candidate_masks.append(candidate_tokenized["attention_mask"])
 
-            records.append(
-                {
-                    "chosen_ids": chosen_tokenized["input_ids"],
-                    "chosen_mask": chosen_tokenized["attention_mask"],
-                    "rejected_ids": reject_tokenized["input_ids"],
-                    "rejected_mask": reject_tokenized["attention_mask"],
-                }
-            )
+        records.append(
+            {
+                "candidate_ids": candidate_ids,
+                "candidate_masks": candidate_masks,
+                "num_correct": row["num_correct"],
+                "subset": row["subset"],  # needed for grouping
+                "id": row["id"],
+            }
+        )
 
     return Dataset.from_list(records)
 
@@ -190,4 +187,27 @@ def collate_fn(batch, tokenizer: AutoTokenizer):
             [x["rejected_ids"] for x in batch], tokenizer.pad_token_id
         ),
         "rejected_mask": pad_sequences([x["rejected_mask"] for x in batch], 0),
+    }
+
+
+def reward_bench_collate_fn(batch, tokenizer: AutoTokenizer):
+    """Collate one grouped RewardBench 2 prompt at a time."""
+    if len(batch) != 1:
+        raise ValueError("RewardBench grouped eval currently expects batch_size=1")
+
+    row = batch[0]
+
+    def pad_sequences(sequences: list[list[int]], pad_value: int) -> torch.Tensor:
+        max_len = max(len(seq) for seq in sequences)
+        padded = []
+        for seq in sequences:
+            padded.append(seq + [pad_value] * (max_len - len(seq)))
+        return torch.tensor(padded, dtype=torch.long)
+
+    return {
+        "candidate_ids": pad_sequences(row["candidate_ids"], tokenizer.pad_token_id),
+        "candidate_masks": pad_sequences(row["candidate_masks"], 0),
+        "num_correct": row["num_correct"],
+        "subset": row["subset"],
+        "id": row["id"],
     }

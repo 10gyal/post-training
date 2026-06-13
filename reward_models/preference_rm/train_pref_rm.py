@@ -27,6 +27,7 @@ from reward_models.preference_rm.utils import (  # noqa: E402
     load_tokenizer,
     prepare_dataset,
     prepare_reward_bench_dataset,
+    reward_bench_collate_fn,
 )
 
 console = Console()
@@ -93,6 +94,59 @@ def eval(model: BTModel, dloader: DataLoader) -> dict[str, float]:
     }
 
 
+def eval_reward_bench(model: BTModel, dloader: DataLoader) -> dict[str, float]:
+    """Measure RewardBench 2 prompt-level top-candidate accuracy."""
+    device = next(model.parameters()).device
+
+    correct, total = 0.0, 0
+    correct_reward_sum, incorrect_reward_sum = 0.0, 0.0
+    correct_count, incorrect_count = 0, 0
+
+    model.eval()
+    with torch.no_grad():
+        for batch in dloader:
+            ids = batch["candidate_ids"].to(device)
+            masks = batch["candidate_masks"].to(device)
+            num_correct = batch["num_correct"]
+
+            scores = model.get_reward(ids, masks).detach().float().cpu()
+            max_score = scores.max()
+            top_mask = scores == max_score
+            top_correct = top_mask[:num_correct].any().item()
+
+            if top_correct:
+                correct += 1.0 / top_mask.sum().item()
+            total += 1
+
+            correct_scores = scores[:num_correct]
+            incorrect_scores = scores[num_correct:]
+            correct_reward_sum += correct_scores.sum().item()
+            incorrect_reward_sum += incorrect_scores.sum().item()
+            correct_count += correct_scores.numel()
+            incorrect_count += incorrect_scores.numel()
+
+    if total == 0:
+        return {
+            "accuracy": float("nan"),
+            "correct_reward": float("nan"),
+            "incorrect_reward": float("nan"),
+            "reward_margin": float("nan"),
+        }
+
+    mean_correct = correct_reward_sum / correct_count if correct_count else float("nan")
+    mean_incorrect = (
+        incorrect_reward_sum / incorrect_count if incorrect_count else float("nan")
+    )
+    margin = mean_correct - mean_incorrect
+
+    return {
+        "accuracy": correct / total,
+        "correct_reward": mean_correct,
+        "incorrect_reward": mean_incorrect,
+        "reward_margin": margin,
+    }
+
+
 def print_eval_metrics(metrics: dict[str, float]) -> None:
     table = Table.grid(padding=(0, 2))
     table.add_column(style="bold")
@@ -112,6 +166,29 @@ def print_eval_metrics(metrics: dict[str, float]) -> None:
 
     console.print()
     console.print(Panel(table, title="Evaluation", border_style="green"))
+
+
+def print_reward_bench_metrics(metrics: dict[str, float]) -> None:
+    table = Table.grid(padding=(0, 2))
+    table.add_column(style="bold")
+    table.add_column(justify="right")
+
+    accuracy = metrics["accuracy"]
+    if accuracy == accuracy:
+        table.add_row(
+            "RewardBench 2 accuracy", f"[bold green]{accuracy:.2%}[/bold green]"
+        )
+        table.add_row("Mean correct reward", f"{metrics['correct_reward']:.4f}")
+        table.add_row("Mean incorrect reward", f"{metrics['incorrect_reward']:.4f}")
+        table.add_row("Mean margin", f"{metrics['reward_margin']:+.4f}")
+    else:
+        table.add_row("RewardBench 2 accuracy", "[bold yellow]n/a[/bold yellow]")
+        table.add_row("Mean correct reward", "nan")
+        table.add_row("Mean incorrect reward", "nan")
+        table.add_row("Mean margin", "nan")
+
+    console.print()
+    console.print(Panel(table, title="RewardBench 2 Evaluation", border_style="green"))
 
 
 def main():
@@ -278,25 +355,27 @@ def main():
         )
         eval_loader = DataLoader(
             eval_ds,
-            batch_size=batch_size,
+            batch_size=1,
             shuffle=False,
             drop_last=False,
-            collate_fn=lambda b: collate_fn(b, tokenizer),
+            collate_fn=lambda b: reward_bench_collate_fn(b, tokenizer),
         )
 
-        metrics = eval(model, eval_loader)
+        metrics = eval_reward_bench(model, eval_loader)
         if wandb is not None:
             wandb.log(
                 {
                     "eval/reward_bench_accuracy": metrics["accuracy"],
-                    "eval/reward_bench_chosen_reward": metrics["chosen_reward"],
-                    "eval/reward_bench_rejected_reward": metrics["rejected_reward"],
+                    "eval/reward_bench_correct_reward": metrics["correct_reward"],
+                    "eval/reward_bench_incorrect_reward": metrics[
+                        "incorrect_reward"
+                    ],
                     "eval/reward_bench_reward_margin": metrics["reward_margin"],
                 },
                 step=global_step,
             )
 
-        print_eval_metrics(metrics)
+        print_reward_bench_metrics(metrics)
 
     if wandb is not None:
         wandb.finish()

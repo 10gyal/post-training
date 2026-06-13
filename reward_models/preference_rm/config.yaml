@@ -1,6 +1,6 @@
 base_model: "Qwen/Qwen3-0.6B-Base" # "openai-community/gpt2" 
 dataset_name: "argilla/ultrafeedback-binarized-preferences-cleaned"
-limit: 5000
+limit: 2
 max_length: 1024
 batch_size: 2
 lr: 5e-5
