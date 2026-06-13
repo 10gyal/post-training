@@ -26,6 +26,7 @@ from reward_models.preference_rm.utils import (  # noqa: E402
     load_config,
     load_tokenizer,
     prepare_dataset,
+    prepare_reward_bench_dataset,
 )
 
 console = Console()
@@ -56,7 +57,7 @@ class BTModel(BaseRM):
 
 
 def eval(model: BTModel, dloader: DataLoader) -> dict[str, float]:
-    """Measure preference accuracy and reward statistics on a test split."""
+    """Measure preference accuracy and reward statistics on an eval dataset."""
     device = next(model.parameters()).device
 
     correct, total = 0, 0
@@ -141,7 +142,7 @@ def main():
 
     tokenizer = load_tokenizer(base_model)
 
-    train_ds, test_ds = prepare_dataset(
+    train_ds = prepare_dataset(
         dataset_name, tokenizer, max_length, limit, split="train"
     )
     console.print(f"[bold]Dataset Size:[/bold] {len(train_ds)}")
@@ -269,28 +270,36 @@ def main():
                     rejected=f"{r_rejected.detach().float().mean().item():.4f}",
                 )
 
-    dloader = DataLoader(
-        test_ds,
-        batch_size=batch_size,
-        shuffle=True,
-        drop_last=len(test_ds) > batch_size,
-        collate_fn=lambda b: collate_fn(b, tokenizer),
-    )
-
-    metrics = eval(model, dloader)
-    if wandb is not None:
-        wandb.log(
-            {
-                "eval/accuracy": metrics["accuracy"],
-                "eval/chosen_reward": metrics["chosen_reward"],
-                "eval/rejected_reward": metrics["rejected_reward"],
-                "eval/reward_margin": metrics["reward_margin"],
-            },
-            step=global_step,
+    if cfg.evaluate_on_reward_bench:
+        eval_ds = prepare_reward_bench_dataset(
+            tokenizer,
+            subset=cfg.reward_bench_subset,
+            max_length=max_length,
         )
-        wandb.finish()
+        eval_loader = DataLoader(
+            eval_ds,
+            batch_size=batch_size,
+            shuffle=False,
+            drop_last=False,
+            collate_fn=lambda b: collate_fn(b, tokenizer),
+        )
 
-    print_eval_metrics(metrics)
+        metrics = eval(model, eval_loader)
+        if wandb is not None:
+            wandb.log(
+                {
+                    "eval/reward_bench_accuracy": metrics["accuracy"],
+                    "eval/reward_bench_chosen_reward": metrics["chosen_reward"],
+                    "eval/reward_bench_rejected_reward": metrics["rejected_reward"],
+                    "eval/reward_bench_reward_margin": metrics["reward_margin"],
+                },
+                step=global_step,
+            )
+
+        print_eval_metrics(metrics)
+
+    if wandb is not None:
+        wandb.finish()
 
 
 if __name__ == "__main__":

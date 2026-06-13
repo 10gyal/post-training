@@ -8,6 +8,8 @@ epochs: 1
 warmup_ratio: 0.1
 grad_accum_steps: 16
 max_grad_norm: 1.0
+evaluate_on_reward_bench: tru
+reward_bench_subset: "Precise IF"
 use_wandb: true
 wandb_project: "pref_rm"
 wandb_run_name: null

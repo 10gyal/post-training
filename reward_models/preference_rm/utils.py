@@ -1,6 +1,5 @@
 from pathlib import Path
 import yaml
-import random
 
 import torch
 from datasets import Dataset, load_dataset
@@ -30,6 +29,42 @@ def format_record(record):
     return "\n".join(formatted_record)
 
 
+def format_prompt_response(prompt: str, response: str) -> str:
+    return f"user: {prompt}\nassistant: {response}"
+
+
+def prompt_response_to_messages(prompt: str, response: str) -> list[dict[str, str]]:
+    return [
+        {"role": "user", "content": prompt},
+        {"role": "assistant", "content": response},
+    ]
+
+
+def tokenize_record(
+    messages: list[dict[str, str]],
+    tokenizer: AutoTokenizer,
+    max_length: int,
+    fallback_text: str | None = None,
+):
+    """Tokenize with chat template when available, otherwise use local text format."""
+    if getattr(tokenizer, "chat_template", None):
+        return tokenizer.apply_chat_template(
+            messages,
+            tokenize=True,
+            max_length=max_length,
+            truncation=True,
+            add_generation_prompt=False,
+            return_dict=True,
+        )
+
+    return tokenizer(
+        fallback_text if fallback_text is not None else format_record(messages),
+        max_length=max_length,
+        truncation=True,
+        add_special_tokens=True,
+    )
+
+
 def prepare_dataset(
     dataset_name,
     tokenizer: AutoTokenizer,
@@ -49,24 +84,30 @@ def prepare_dataset(
         prompt = dp.get("prompt", "")
 
         if isinstance(chosen, list):
-            chosen_record = format_record(chosen)
-            rejected_record = format_record(rejected)
+            chosen_messages = chosen
+            rejected_messages = rejected
+            chosen_fallback = format_record(chosen_messages)
+            rejected_fallback = format_record(rejected_messages)
         elif isinstance(chosen, str):
-            chosen_record = f"user: {prompt}\nassistant: {chosen}"
-            rejected_record = f"user: {prompt}\nassistant: {rejected}"
+            chosen_messages = prompt_response_to_messages(prompt, chosen)
+            rejected_messages = prompt_response_to_messages(prompt, rejected)
+            chosen_fallback = format_prompt_response(prompt, chosen)
+            rejected_fallback = format_prompt_response(prompt, rejected)
+        else:
+            raise TypeError(f"Unsupported preference record type: {type(chosen)}")
 
-        chosen = tokenizer(
-            chosen_record,
-            max_length=max_length,
-            truncation=True,
-            add_special_tokens=True,
+        chosen = tokenize_record(
+            chosen_messages,
+            tokenizer,
+            max_length,
+            fallback_text=chosen_fallback,
         )
 
-        rejected = tokenizer(
-            rejected_record,
-            max_length=max_length,
-            truncation=True,
-            add_special_tokens=True,
+        rejected = tokenize_record(
+            rejected_messages,
+            tokenizer,
+            max_length,
+            fallback_text=rejected_fallback,
         )
 
         records.append(
@@ -77,19 +118,50 @@ def prepare_dataset(
                 "rejected_mask": rejected["attention_mask"],
             }
         )
-    # Split records into train/test datasets with 0.2 ratio and return both
 
-    random.seed(42)
-    indices = list(range(len(records)))
-    random.shuffle(indices)
-    split_idx = int(len(indices) * 0.8)
-    train_indices = indices[:split_idx]
-    test_indices = indices[split_idx:]
+    return Dataset.from_list(records)
 
-    train_records = [records[i] for i in train_indices]
-    test_records = [records[i] for i in test_indices]
 
-    return Dataset.from_list(train_records), Dataset.from_list(test_records)
+def prepare_reward_bench_dataset(
+    tokenizer: AutoTokenizer, subset: str | None = None, max_length: int = 1024
+) -> Dataset:
+    ds = load_dataset("allenai/reward-bench-2", split="test")
+    if subset:
+        ds = ds.filter(lambda ex: ex["subset"] == subset)
+
+    records = []
+    for row in ds:
+        prompt = row["prompt"]
+        chosen = row["chosen"][-1]
+        rejects = row["rejected"]
+
+        chosen_record = prompt_response_to_messages(prompt, chosen)
+        chosen_tokenized = tokenize_record(
+            chosen_record,
+            tokenizer,
+            max_length,
+            fallback_text=format_prompt_response(prompt, chosen),
+        )
+
+        for r in rejects:
+            rejected_record = prompt_response_to_messages(prompt, r)
+            reject_tokenized = tokenize_record(
+                rejected_record,
+                tokenizer,
+                max_length=max_length,
+                fallback_text=format_prompt_response(prompt, r),
+            )
+
+            records.append(
+                {
+                    "chosen_ids": chosen_tokenized["input_ids"],
+                    "chosen_mask": chosen_tokenized["attention_mask"],
+                    "rejected_ids": reject_tokenized["input_ids"],
+                    "rejected_mask": reject_tokenized["attention_mask"],
+                }
+            )
+
+    return Dataset.from_list(records)
 
 
 def collate_fn(batch, tokenizer: AutoTokenizer):

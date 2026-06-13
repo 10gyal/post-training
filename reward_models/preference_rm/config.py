@@ -12,6 +12,8 @@ class Config(BaseModel):
     warmup_ratio: float
     grad_accum_steps: int = 1
     max_grad_norm: float = 1.0
+    evaluate_on_reward_bench: bool = False
+    reward_bench_subset: str | None = None
     use_wandb: bool = False
     wandb_project: str = "learn-rlhf"
     wandb_run_name: str | None = None
