@@ -1,3 +1,4 @@
+import argparse
 import math
 import sys
 from pathlib import Path
@@ -11,6 +12,7 @@ from transformers import AutoTokenizer, get_cosine_schedule_with_warmup
 
 from rich.console import Console
 from rich.markup import escape
+from rich.panel import Panel
 from rich.progress import (
     BarColumn,
     Progress,
@@ -216,7 +218,7 @@ def train_prm(
     epochs: int = DEFAULT_EPOCHS,
     warmup_ratio: float = DEFAULT_WARMUP_RATIO,
     seed: int = DEFAULT_SEED,
-):
+) -> tuple[ProcessRewardModel, AutoTokenizer]:
     random.seed(seed)
     torch.manual_seed(seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -329,8 +331,77 @@ def train_prm(
                     lr=f"{optimizer.param_groups[0]['lr']:.2e}",
                 )
 
+    return model, tokenizer
 
-# todo: evals
+
+def eval_prm(
+    model: ProcessRewardModel,
+    tokenizer: AutoTokenizer,
+    dataset_name: str = DATASET_NAME,
+    split: str = "test",
+    limit: int = TEST_SAMPLES,
+    batch_size: int = DEFAULT_BATCH_SIZE,
+) -> dict[str, float]:
+    device = next(model.parameters()).device
+    eval_ds = prepare_prm_dataset(dataset_name, tokenizer, split, limit)
+
+    if len(eval_ds) == 0:
+        return {
+            "loss": float("nan"),
+            "accuracy": float("nan"),
+            "steps": 0.0,
+        }
+
+    loader = DataLoader(
+        eval_ds,
+        batch_size=batch_size,
+        shuffle=False,
+        drop_last=False,
+        collate_fn=lambda b: collate_fn(b, tokenizer),
+    )
+
+    total_loss = 0.0
+    total_correct = 0
+    total_steps = 0
+    total_batches = 0
+
+    model.eval()
+    with torch.no_grad():
+        for batch in loader:
+            batch = {k: v.to(device) for k, v in batch.items()}
+            loss, logits = model(**batch)
+            mask = batch["labels"] != -100
+            preds = logits[mask].argmax(dim=-1)
+
+            total_loss += loss.detach().float().item()
+            total_correct += (preds == batch["labels"][mask]).sum().item()
+            total_steps += mask.sum().item()
+            total_batches += 1
+
+    return {
+        "loss": total_loss / max(1, total_batches),
+        "accuracy": total_correct / max(1, total_steps),
+        "steps": float(total_steps),
+    }
+
+
+def print_eval_metrics(metrics: dict[str, float]) -> None:
+    table = Table.grid(padding=(0, 2))
+    table.add_column(style="bold")
+    table.add_column(justify="right")
+
+    accuracy = metrics["accuracy"]
+    if accuracy == accuracy:
+        table.add_row("Step accuracy", f"[bold green]{accuracy:.2%}[/bold green]")
+        table.add_row("Mean loss", f"{metrics['loss']:.4f}")
+        table.add_row("Scored steps", f"{metrics['steps']:.0f}")
+    else:
+        table.add_row("Step accuracy", "[bold yellow]n/a[/bold yellow]")
+        table.add_row("Mean loss", "nan")
+        table.add_row("Scored steps", "0")
+
+    console.print()
+    console.print(Panel(table, title="Process RM Eval", border_style="green"))
 
 
 def demo_scoring(
@@ -446,5 +517,26 @@ def demo_scoring(
     return results
 
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Train and evaluate a process RM.")
+    parser.add_argument(
+        "--eval",
+        action="store_true",
+        help="Run aggregate step-token eval after training.",
+    )
+
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+
+    model, tokenizer = train_prm()
+
+    if args.eval:
+        metrics = eval_prm(model, tokenizer)
+        print_eval_metrics(metrics)
+
+
 if __name__ == "__main__":
-    train_prm()
+    main()
