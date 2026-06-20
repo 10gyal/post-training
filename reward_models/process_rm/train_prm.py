@@ -30,7 +30,7 @@ BASE_MODEL = "Qwen/Qwen3-0.6B-Base"
 DATASET_NAME = "trl-lib/prm800k"  # clean preprocessed version of openai/prm800k
 DEFAULT_SAMPLES = 2
 STEP_SEPARATOR = "\n<step>\n"
-PRM_CLASS_VALUES = [-1, 0, 1]  # Bad, Neutral, Good
+PRM_CLASS_VALUES = [False, True]  # Bad, Good
 PRM_CLASS_TO_IDX = {value: idx for idx, value in enumerate(PRM_CLASS_VALUES)}
 
 
@@ -63,6 +63,9 @@ def prepare_prm_dataset(
 ):
     stream = load_dataset(dataset_name, split="train", streaming=True)
 
+    sep_token_ids = tokenizer(STEP_SEPARATOR, add_special_tokens=False)["input_ids"]
+    len_sep_token_ids = len(sep_token_ids)
+
     records = []
     for sample in stream:
         if len(records) == limit:
@@ -74,6 +77,8 @@ def prepare_prm_dataset(
         # simple chat template
         prompt = f"Problem: {prompt}\nReasoning trace:\n"
         prompt_ids = tokenizer(prompt, add_special_tokens=False)["input_ids"]
+
+        print("prompt:", prompt)
 
         # Chunk very long traces to avoid OOM
         for start in range(0, len(steps), max_steps_per_sample):
@@ -93,6 +98,12 @@ def prepare_prm_dataset(
             for step_text, lbl in zip(chunk_steps, chunk_labels, strict=True):
                 step_payload = step_text.strip() + STEP_SEPARATOR
                 encoded = tokenizer(step_payload, add_special_tokens=False)["input_ids"]
+
+                # make sure that the separator is not tokenized differently
+                assert (
+                    encoded[-len_sep_token_ids:] == sep_token_ids
+                ), "separator tokenized differently"
+
                 input_ids.extend(encoded)
                 attention_mask.extend([1] * len(encoded))
 
@@ -152,11 +163,11 @@ class ProcessRewardModel(BaseRM):
         Args:
             input_ids: token ids [batch, seq_len]
             attention_mask: Attention mask [batch, seq_len]
-            labels: Per-token class labels (0/1/2 for steps, -100 for masked)
+            labels: Per-token class labels (0/1 for steps, -100 for masked)
 
         Returns:
             loss: Cross-entropy loss on step tokens
-            logits: Per-token class logits [batch, seq_len, 3]
+            logits: Per-token class logits [batch, seq_len, 2]
         """
 
         hidden = self.get_hidden_states(input_ids, attention_mask)
