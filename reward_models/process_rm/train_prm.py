@@ -10,6 +10,7 @@ from torch.utils.data import DataLoader
 from transformers import AutoTokenizer, get_cosine_schedule_with_warmup
 
 from rich.console import Console
+from rich.markup import escape
 from rich.progress import (
     BarColumn,
     Progress,
@@ -17,6 +18,7 @@ from rich.progress import (
     TextColumn,
     TimeElapsedColumn,
 )
+from rich.table import Table
 
 if __package__ is None or __package__ == "":
     sys.path.append(str(Path(__file__).resolve().parents[2]))
@@ -32,7 +34,7 @@ DEFAULT_SAMPLES = 2
 STEP_SEPARATOR = "\n<step>\n"
 PRM_CLASS_VALUES = [False, True]  # Bad, Good
 PRM_CLASS_TO_IDX = {value: idx for idx, value in enumerate(PRM_CLASS_VALUES)}
-
+TEST_SAMPLES = 10
 
 # hyperparameters
 DEFAULT_MAX_STEPS = 20
@@ -57,11 +59,16 @@ def load_tokenizer(model_id: str) -> AutoTokenizer:
 def prepare_prm_dataset(
     dataset_name: str,
     tokenizer: AutoTokenizer,
-    limit: int = 10,
+    split: str = "train",
+    limit: int = DEFAULT_SAMPLES,
     max_steps_per_sample: int = DEFAULT_MAX_STEPS,
     max_tokens_per_sample: int = DEFAULT_MAX_TOKENS,
 ):
-    stream = load_dataset(dataset_name, split="train", streaming=True)
+    if isinstance(split, int):
+        limit = split
+        split = "train"
+
+    stream = load_dataset(dataset_name, split=split, streaming=True)
 
     sep_token_ids = tokenizer(STEP_SEPARATOR, add_special_tokens=False)["input_ids"]
     len_sep_token_ids = len(sep_token_ids)
@@ -94,6 +101,7 @@ def prepare_prm_dataset(
             input_ids = list(prompt_ids)
             attention_mask = [1] * len(input_ids)
             label_ids = [-100] * len(input_ids)
+            step_label_values = []
 
             for step_text, lbl in zip(chunk_steps, chunk_labels, strict=True):
                 step_payload = step_text.strip() + STEP_SEPARATOR
@@ -112,6 +120,7 @@ def prepare_prm_dataset(
                 cls_id = PRM_CLASS_TO_IDX.get(int(lbl), PRM_CLASS_TO_IDX[0])
                 step_labels[-1] = cls_id
                 label_ids.extend(step_labels)
+                step_label_values.append(PRM_CLASS_VALUES[cls_id])
 
             # Skip super long traces
             if len(input_ids) > max_tokens_per_sample:
@@ -122,13 +131,16 @@ def prepare_prm_dataset(
                     "input_ids": input_ids,
                     "attention_mask": attention_mask,
                     "labels": label_ids,
+                    "prompt": prompt,
+                    "steps": chunk_steps,
+                    "step_labels": step_label_values,
                 }
             )
 
     return Dataset.from_list(records[:limit])
 
 
-def collate_fn(batch, tokenizer: AutoTokenizer):
+def collate_fn(batch, tokenizer: AutoTokenizer, include_metadata: bool = False):
     max_len = max(len(item["input_ids"]) for item in batch)
     inputs = torch.full((len(batch), max_len), tokenizer.pad_token_id, dtype=torch.long)
     attn = torch.zeros_like(inputs)
@@ -140,7 +152,14 @@ def collate_fn(batch, tokenizer: AutoTokenizer):
         attn[idx, :length] = torch.tensor(item["attention_mask"], dtype=torch.long)
         labels[idx, :length] = torch.tensor(item["labels"], dtype=torch.long)
 
-    return {"input_ids": inputs, "attention_mask": attn, "labels": labels}
+    result = {"input_ids": inputs, "attention_mask": attn, "labels": labels}
+
+    if include_metadata:
+        result["prompts"] = [item.get("prompt", "") for item in batch]
+        result["steps"] = [item.get("steps", []) for item in batch]
+        result["step_labels"] = [item.get("step_labels", []) for item in batch]
+
+    return result
 
 
 class ProcessRewardModel(BaseRM):
@@ -204,7 +223,7 @@ def train_prm(
 
     tokenizer = load_tokenizer(base_model)
 
-    data = prepare_prm_dataset(dataset_name, tokenizer, samples)
+    data = prepare_prm_dataset(dataset_name, tokenizer, "train", samples)
 
     loader = DataLoader(
         data,
@@ -312,6 +331,120 @@ def train_prm(
 
 
 # todo: evals
+
+
+def demo_scoring(
+    model: ProcessRewardModel,
+    tokenizer: AutoTokenizer,
+    limit: int = TEST_SAMPLES,
+    batch_size: int = DEFAULT_BATCH_SIZE,
+    seed: int = DEFAULT_SEED,
+    dataset_name: str = DATASET_NAME,
+) -> list[dict[str, object]]:
+    device = next(model.parameters()).device
+    random.seed(seed)
+
+    test_ds = prepare_prm_dataset(dataset_name, tokenizer, "test", limit)
+
+    if len(test_ds) == 0:
+        console.print("[bold yellow]No test samples were prepared.[/bold yellow]")
+        return []
+
+    generator = torch.Generator()
+    generator.manual_seed(seed)
+
+    loader = DataLoader(
+        test_ds,
+        batch_size=batch_size,
+        shuffle=True,
+        drop_last=False,
+        generator=generator,
+        collate_fn=lambda b: collate_fn(b, tokenizer, include_metadata=True),
+    )
+
+    results = []
+    sample_counter = 0
+    model.eval()
+    with torch.no_grad():
+        for batch in loader:
+            tensor_batch = {
+                key: value.to(device)
+                for key, value in batch.items()
+                if torch.is_tensor(value)
+            }
+            _, logits = model(**tensor_batch)
+            probs = torch.softmax(logits, dim=-1).detach().float().cpu()
+
+            # Identifying positions of step terminator tokens (where label != -100)
+            labels = tensor_batch["labels"].detach().cpu()
+            batch_rows, _ = labels.shape
+
+            for i in range(batch_rows):
+                sample_idx = sample_counter
+                sample_counter += 1
+                sample_logits = probs[i]  # [seq_len, n_classes]
+                sample_labels = labels[i]  # [seq_len]
+                step_positions = (sample_labels != -100).nonzero(as_tuple=True)[0]
+                steps = batch["steps"][i]
+                step_labels = batch["step_labels"][i]
+
+                for step_idx, token_pos in enumerate(step_positions.tolist()):
+                    label_id = sample_labels[token_pos].item()
+                    target = PRM_CLASS_VALUES[label_id]
+                    prob_vec = sample_logits[token_pos].tolist()
+                    probs_by_class = {
+                        cls: prob_vec[PRM_CLASS_TO_IDX[cls]] for cls in PRM_CLASS_VALUES
+                    }
+                    pred_id = max(range(len(prob_vec)), key=prob_vec.__getitem__)
+                    prediction = PRM_CLASS_VALUES[int(pred_id)]
+                    step_text = steps[step_idx] if step_idx < len(steps) else ""
+                    raw_target = (
+                        step_labels[step_idx] if step_idx < len(step_labels) else target
+                    )
+
+                    results.append(
+                        {
+                            "sample": sample_idx,
+                            "step": step_idx + 1,
+                            "text": step_text,
+                            "target": raw_target,
+                            "prediction": prediction,
+                            "prob_bad": probs_by_class[False],
+                            "prob_good": probs_by_class[True],
+                        }
+                    )
+
+    table = Table(title="Process RM Step Scores")
+    table.add_column("Row", justify="right")
+    table.add_column("Sample", justify="right")
+    table.add_column("Step", justify="right")
+    table.add_column("Target")
+    table.add_column("Pred")
+    table.add_column("P(bad)", justify="right")
+    table.add_column("P(good)", justify="right")
+    table.add_column("Text", overflow="fold")
+
+    for row_idx, row in enumerate(results, start=1):
+        text = str(row["text"]).strip().replace("\n", " ")
+        if len(text) > 140:
+            text = text[:137].rstrip() + "..."
+        target = "good" if row["target"] else "bad"
+        prediction = "good" if row["prediction"] else "bad"
+        table.add_row(
+            str(row_idx),
+            str(row["sample"]),
+            str(row["step"]),
+            target,
+            prediction,
+            f"{row['prob_bad']:.3f}",
+            f"{row['prob_good']:.3f}",
+            escape(text),
+        )
+
+    console.print()
+    console.print(table)
+    return results
+
 
 if __name__ == "__main__":
     train_prm()
