@@ -48,7 +48,7 @@ DEFAULT_EPOCHS = 1
 DEFAULT_WARMUP_RATIO = 0.05
 DEFAULT_SEED = 42
 DEFAULT_WANDB_PROJECT = "process_rm"
-DEFAULT_WANDB_MODE = "online"
+DEFAULT_WANDB_ONLINE = False
 DEFAULT_LOG_EVERY = 1
 
 
@@ -219,10 +219,8 @@ def train_prm(
     epochs: int = DEFAULT_EPOCHS,
     warmup_ratio: float = DEFAULT_WARMUP_RATIO,
     seed: int = DEFAULT_SEED,
-    use_wandb: bool = False,
     wandb_project: str = DEFAULT_WANDB_PROJECT,
-    wandb_run_name: str | None = None,
-    wandb_mode: str = DEFAULT_WANDB_MODE,
+    wandb_online: bool = DEFAULT_WANDB_ONLINE,
     log_every: int = DEFAULT_LOG_EVERY,
     finish_wandb: bool = True,
 ) -> tuple[ProcessRewardModel, AutoTokenizer]:
@@ -232,13 +230,14 @@ def train_prm(
     log_every = max(1, log_every)
 
     wandb = None
-    if use_wandb:
+    if wandb_online:
         import wandb
+
+        wandb.login()
 
         wandb.init(
             project=wandb_project,
-            name=wandb_run_name,
-            mode=wandb_mode,
+            mode="online",
             config={
                 "base_model": base_model,
                 "dataset_name": dataset_name,
@@ -250,7 +249,7 @@ def train_prm(
                 "warmup_ratio": warmup_ratio,
                 "seed": seed,
                 "device": str(device),
-                "wandb_mode": wandb_mode,
+                "wandb_online": wandb_online,
                 "log_every": log_every,
             },
         )
@@ -573,25 +572,15 @@ def parse_args() -> argparse.Namespace:
         help="Run aggregate step-token eval after training.",
     )
     parser.add_argument(
-        "--wandb",
-        action="store_true",
-        help="Log training metrics to Weights & Biases.",
-    )
-    parser.add_argument(
         "--wandb-project",
         default=DEFAULT_WANDB_PROJECT,
         help="Weights & Biases project name.",
     )
     parser.add_argument(
-        "--wandb-run-name",
-        default=None,
-        help="Weights & Biases run name.",
-    )
-    parser.add_argument(
-        "--wandb-mode",
-        default=DEFAULT_WANDB_MODE,
-        choices=("online", "offline", "disabled"),
-        help="Weights & Biases mode.",
+        "--wandb-online",
+        action="store_true",
+        default=DEFAULT_WANDB_ONLINE,
+        help="Prompt for W&B login in Python, then log online.",
     )
     parser.add_argument(
         "--log-every",
@@ -607,17 +596,15 @@ def main() -> None:
     args = parse_args()
 
     model, tokenizer = train_prm(
-        use_wandb=args.wandb,
         wandb_project=args.wandb_project,
-        wandb_run_name=args.wandb_run_name,
-        wandb_mode=args.wandb_mode,
+        wandb_online=args.wandb_online,
         log_every=max(1, args.log_every),
         finish_wandb=not args.eval,
     )
 
     if args.eval:
         metrics = eval_prm(model, tokenizer)
-        if args.wandb:
+        if args.wandb_online:
             import wandb
 
             wandb.log(
