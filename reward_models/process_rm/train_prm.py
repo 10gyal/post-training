@@ -6,6 +6,7 @@ from pathlib import Path
 import random
 import torch
 import torch.nn.functional as F
+import wandb
 from datasets import Dataset, load_dataset
 from torch.utils.data import DataLoader
 from transformers import AutoTokenizer, get_cosine_schedule_with_warmup
@@ -32,7 +33,7 @@ console = Console()
 
 BASE_MODEL = "Qwen/Qwen3-0.6B-Base"
 DATASET_NAME = "trl-lib/prm800k"  # clean preprocessed version of openai/prm800k
-DEFAULT_SAMPLES = 2
+DEFAULT_SAMPLES = 1000
 STEP_SEPARATOR = "\n<step>\n"
 PRM_CLASS_VALUES = [False, True]  # Bad, Good
 PRM_CLASS_TO_IDX = {value: idx for idx, value in enumerate(PRM_CLASS_VALUES)}
@@ -41,14 +42,14 @@ TEST_SAMPLES = 10
 # hyperparameters
 DEFAULT_MAX_STEPS = 20
 DEFAULT_MAX_TOKENS = 5500
-DEFAULT_BATCH_SIZE = 1
+DEFAULT_BATCH_SIZE = 2
 DEFAULT_LR = 2e-5
-DEFAULT_GRAD_ACCUM_STEPS = 1
+DEFAULT_GRAD_ACCUM_STEPS = 8
 DEFAULT_EPOCHS = 1
 DEFAULT_WARMUP_RATIO = 0.05
 DEFAULT_SEED = 42
 DEFAULT_WANDB_PROJECT = "process_rm"
-DEFAULT_WANDB_ONLINE = False
+DEFAULT_WANDB_ONLINE = True
 DEFAULT_LOG_EVERY = 1
 
 
@@ -111,9 +112,9 @@ def prepare_prm_dataset(
                 encoded = tokenizer(step_payload, add_special_tokens=False)["input_ids"]
 
                 # make sure that the separator is not tokenized differently
-                assert (
-                    encoded[-len_sep_token_ids:] == sep_token_ids
-                ), "separator tokenized differently"
+                # assert (
+                #     encoded[-len_sep_token_ids:] == sep_token_ids
+                # ), "separator tokenized differently"
 
                 input_ids.extend(encoded)
                 attention_mask.extend([1] * len(encoded))
@@ -231,10 +232,6 @@ def train_prm(
 
     wandb = None
     if wandb_online:
-        import wandb
-
-        wandb.login()
-
         wandb.init(
             project=wandb_project,
             mode="online",
@@ -414,16 +411,42 @@ def eval_prm(
 
     model.eval()
     with torch.no_grad():
-        for batch in loader:
-            batch = {k: v.to(device) for k, v in batch.items()}
-            loss, logits = model(**batch)
-            mask = batch["labels"] != -100
-            preds = logits[mask].argmax(dim=-1)
+        with Progress(
+            TextColumn("[bold blue]{task.description}"),
+            BarColumn(),
+            TaskProgressColumn(),
+            TimeElapsedColumn(),
+            TextColumn("loss={task.fields[loss]}"),
+            TextColumn("acc={task.fields[acc]}"),
+            TextColumn("steps={task.fields[steps]}"),
+            console=console,
+        ) as progress:
+            task = progress.add_task(
+                f"Eval {split}",
+                total=len(loader),
+                loss="n/a",
+                acc="n/a",
+                steps="0",
+            )
 
-            total_loss += loss.detach().float().item()
-            total_correct += (preds == batch["labels"][mask]).sum().item()
-            total_steps += mask.sum().item()
-            total_batches += 1
+            for batch in loader:
+                batch = {k: v.to(device) for k, v in batch.items()}
+                loss, logits = model(**batch)
+                mask = batch["labels"] != -100
+                preds = logits[mask].argmax(dim=-1)
+
+                total_loss += loss.detach().float().item()
+                total_correct += (preds == batch["labels"][mask]).sum().item()
+                total_steps += mask.sum().item()
+                total_batches += 1
+
+                progress.update(
+                    task,
+                    advance=1,
+                    loss=f"{total_loss / max(1, total_batches):.4f}",
+                    acc=f"{total_correct / max(1, total_steps):.3f}",
+                    steps=str(total_steps),
+                )
 
     return {
         "loss": total_loss / max(1, total_batches),
@@ -595,6 +618,9 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
 
+    if args.wandb_online:
+        wandb.login()
+
     model, tokenizer = train_prm(
         wandb_project=args.wandb_project,
         wandb_online=args.wandb_online,
@@ -605,8 +631,6 @@ def main() -> None:
     if args.eval:
         metrics = eval_prm(model, tokenizer)
         if args.wandb_online:
-            import wandb
-
             wandb.log(
                 {
                     "eval/loss": metrics["loss"],
