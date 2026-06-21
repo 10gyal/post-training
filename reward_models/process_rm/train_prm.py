@@ -392,7 +392,15 @@ def eval_prm(
     if len(eval_ds) == 0:
         return {
             "accuracy": float("nan"),
+            "balanced_accuracy": float("nan"),
+            "majority_baseline": float("nan"),
             "steps": 0.0,
+            "target_bad": 0.0,
+            "target_good": 0.0,
+            "pred_bad": 0.0,
+            "pred_good": 0.0,
+            "accuracy_bad": float("nan"),
+            "accuracy_good": float("nan"),
         }
 
     loader = DataLoader(
@@ -405,6 +413,9 @@ def eval_prm(
 
     total_correct = 0
     total_steps = 0
+    target_counts = torch.zeros(len(PRM_CLASS_VALUES), dtype=torch.long)
+    pred_counts = torch.zeros(len(PRM_CLASS_VALUES), dtype=torch.long)
+    correct_counts = torch.zeros(len(PRM_CLASS_VALUES), dtype=torch.long)
 
     model.eval()
     with torch.no_grad():
@@ -431,10 +442,22 @@ def eval_prm(
                     attention_mask=batch["attention_mask"],
                 )
                 mask = batch["labels"] != -100
+                targets = batch["labels"][mask]
                 preds = logits[mask].argmax(dim=-1)
 
-                total_correct += (preds == batch["labels"][mask]).sum().item()
-                total_steps += mask.sum().item()
+                correct_mask = preds == targets
+                total_correct += correct_mask.sum().item()
+                total_steps += targets.numel()
+                target_counts += torch.bincount(
+                    targets.detach().cpu(), minlength=len(PRM_CLASS_VALUES)
+                )
+                pred_counts += torch.bincount(
+                    preds.detach().cpu(), minlength=len(PRM_CLASS_VALUES)
+                )
+                correct_counts += torch.bincount(
+                    targets[correct_mask].detach().cpu(),
+                    minlength=len(PRM_CLASS_VALUES),
+                )
 
                 progress.update(
                     task,
@@ -443,9 +466,27 @@ def eval_prm(
                     steps=str(total_steps),
                 )
 
+    class_accuracies = torch.full(
+        (len(PRM_CLASS_VALUES),), float("nan"), dtype=torch.float
+    )
+    present_classes = target_counts > 0
+    class_accuracies[present_classes] = (
+        correct_counts[present_classes].float() / target_counts[present_classes].float()
+    )
+    balanced_accuracy = class_accuracies[present_classes].mean().item()
+    majority_baseline = target_counts.max().item() / max(1, total_steps)
+
     return {
         "accuracy": total_correct / max(1, total_steps),
+        "balanced_accuracy": balanced_accuracy,
+        "majority_baseline": majority_baseline,
         "steps": float(total_steps),
+        "target_bad": float(target_counts[PRM_CLASS_TO_IDX[False]].item()),
+        "target_good": float(target_counts[PRM_CLASS_TO_IDX[True]].item()),
+        "pred_bad": float(pred_counts[PRM_CLASS_TO_IDX[False]].item()),
+        "pred_good": float(pred_counts[PRM_CLASS_TO_IDX[True]].item()),
+        "accuracy_bad": class_accuracies[PRM_CLASS_TO_IDX[False]].item(),
+        "accuracy_good": class_accuracies[PRM_CLASS_TO_IDX[True]].item(),
     }
 
 
@@ -457,10 +498,28 @@ def print_eval_metrics(metrics: dict[str, float]) -> None:
     accuracy = metrics["accuracy"]
     if accuracy == accuracy:
         table.add_row("Step accuracy", f"[bold green]{accuracy:.2%}[/bold green]")
+        table.add_row("Balanced accuracy", f"{metrics['balanced_accuracy']:.2%}")
+        table.add_row("Majority baseline", f"{metrics['majority_baseline']:.2%}")
         table.add_row("Scored steps", f"{metrics['steps']:.0f}")
+        table.add_row(
+            "Targets bad/good",
+            f"{metrics['target_bad']:.0f} / {metrics['target_good']:.0f}",
+        )
+        table.add_row(
+            "Preds bad/good",
+            f"{metrics['pred_bad']:.0f} / {metrics['pred_good']:.0f}",
+        )
+        table.add_row("Bad accuracy", f"{metrics['accuracy_bad']:.2%}")
+        table.add_row("Good accuracy", f"{metrics['accuracy_good']:.2%}")
     else:
         table.add_row("Step accuracy", "[bold yellow]n/a[/bold yellow]")
+        table.add_row("Balanced accuracy", "nan")
+        table.add_row("Majority baseline", "nan")
         table.add_row("Scored steps", "0")
+        table.add_row("Targets bad/good", "0 / 0")
+        table.add_row("Preds bad/good", "0 / 0")
+        table.add_row("Bad accuracy", "nan")
+        table.add_row("Good accuracy", "nan")
 
     console.print()
     console.print(Panel(table, title="Process RM Eval", border_style="green"))
@@ -612,7 +671,15 @@ def log_eval_metrics(metrics: dict[str, float]) -> None:
         {
             "eval/accuracy": metrics["accuracy"],
             "eval/step_accuracy": metrics["accuracy"],
+            "eval/balanced_accuracy": metrics["balanced_accuracy"],
+            "eval/majority_baseline": metrics["majority_baseline"],
             "eval/scored_steps": metrics["steps"],
+            "eval/target_bad": metrics["target_bad"],
+            "eval/target_good": metrics["target_good"],
+            "eval/pred_bad": metrics["pred_bad"],
+            "eval/pred_good": metrics["pred_good"],
+            "eval/accuracy_bad": metrics["accuracy_bad"],
+            "eval/accuracy_good": metrics["accuracy_good"],
         }
     )
 
@@ -635,8 +702,9 @@ def main() -> None:
                 },
             )
 
+        device = "cuda" if torch.cuda.is_available() else "cpu"
         tokenizer = load_tokenizer(BASE_MODEL)
-        model = ProcessRewardModel(model_name=BASE_MODEL)
+        model = ProcessRewardModel(model_name=BASE_MODEL).to(device)
         metrics = eval_prm(model, tokenizer)
         if args.wandb_online:
             log_eval_metrics(metrics)
