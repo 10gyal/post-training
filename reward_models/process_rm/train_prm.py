@@ -47,6 +47,9 @@ DEFAULT_GRAD_ACCUM_STEPS = 1
 DEFAULT_EPOCHS = 1
 DEFAULT_WARMUP_RATIO = 0.05
 DEFAULT_SEED = 42
+DEFAULT_WANDB_PROJECT = "process_rm"
+DEFAULT_WANDB_MODE = "online"
+DEFAULT_LOG_EVERY = 1
 
 
 def load_tokenizer(model_id: str) -> AutoTokenizer:
@@ -218,10 +221,41 @@ def train_prm(
     epochs: int = DEFAULT_EPOCHS,
     warmup_ratio: float = DEFAULT_WARMUP_RATIO,
     seed: int = DEFAULT_SEED,
+    use_wandb: bool = False,
+    wandb_project: str = DEFAULT_WANDB_PROJECT,
+    wandb_run_name: str | None = None,
+    wandb_mode: str = DEFAULT_WANDB_MODE,
+    log_every: int = DEFAULT_LOG_EVERY,
+    finish_wandb: bool = True,
 ) -> tuple[ProcessRewardModel, AutoTokenizer]:
     random.seed(seed)
     torch.manual_seed(seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    log_every = max(1, log_every)
+
+    wandb = None
+    if use_wandb:
+        import wandb
+
+        wandb.init(
+            project=wandb_project,
+            name=wandb_run_name,
+            mode=wandb_mode,
+            config={
+                "base_model": base_model,
+                "dataset_name": dataset_name,
+                "samples": samples,
+                "batch_size": batch_size,
+                "lr": lr,
+                "grad_accum_steps": grad_accum_steps,
+                "epochs": epochs,
+                "warmup_ratio": warmup_ratio,
+                "seed": seed,
+                "device": str(device),
+                "wandb_mode": wandb_mode,
+                "log_every": log_every,
+            },
+        )
 
     tokenizer = load_tokenizer(base_model)
 
@@ -311,17 +345,30 @@ def train_prm(
                     scheduler.step()
 
                     optimizer.zero_grad()
-                    global_step += 1
 
                     avg_loss = accum_loss / accum_batches
                     acc = accum_correct / max(1, accum_tokens)
                     display_loss = avg_loss
                     display_acc = acc
 
+                    if wandb is not None and global_step % log_every == 0:
+                        wandb.log(
+                            {
+                                "train/loss": avg_loss,
+                                "train/accuracy": acc,
+                                "train/step_accuracy": acc,
+                                "train/scored_steps": accum_tokens,
+                                "train/lr": optimizer.param_groups[0]["lr"],
+                                "train/epoch": epoch + 1,
+                            },
+                            step=global_step,
+                        )
+
                     accum_loss = 0.0
                     accum_correct = 0.0
                     accum_tokens = 0.0
                     accum_batches = 0
+                    global_step += 1
 
                 progress.update(
                     task,
@@ -330,6 +377,9 @@ def train_prm(
                     acc=f"{display_acc:.3f}",
                     lr=f"{optimizer.param_groups[0]['lr']:.2e}",
                 )
+
+    if wandb is not None and finish_wandb:
+        wandb.finish()
 
     return model, tokenizer
 
@@ -524,6 +574,33 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Run aggregate step-token eval after training.",
     )
+    parser.add_argument(
+        "--wandb",
+        action="store_true",
+        help="Log training metrics to Weights & Biases.",
+    )
+    parser.add_argument(
+        "--wandb-project",
+        default=DEFAULT_WANDB_PROJECT,
+        help="Weights & Biases project name.",
+    )
+    parser.add_argument(
+        "--wandb-run-name",
+        default=None,
+        help="Weights & Biases run name.",
+    )
+    parser.add_argument(
+        "--wandb-mode",
+        default=DEFAULT_WANDB_MODE,
+        choices=("online", "offline", "disabled"),
+        help="Weights & Biases mode.",
+    )
+    parser.add_argument(
+        "--log-every",
+        type=int,
+        default=DEFAULT_LOG_EVERY,
+        help="Log every N optimizer steps.",
+    )
 
     return parser.parse_args()
 
@@ -531,10 +608,29 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
 
-    model, tokenizer = train_prm()
+    model, tokenizer = train_prm(
+        use_wandb=args.wandb,
+        wandb_project=args.wandb_project,
+        wandb_run_name=args.wandb_run_name,
+        wandb_mode=args.wandb_mode,
+        log_every=max(1, args.log_every),
+        finish_wandb=not args.eval,
+    )
 
     if args.eval:
         metrics = eval_prm(model, tokenizer)
+        if args.wandb:
+            import wandb
+
+            wandb.log(
+                {
+                    "eval/loss": metrics["loss"],
+                    "eval/accuracy": metrics["accuracy"],
+                    "eval/step_accuracy": metrics["accuracy"],
+                    "eval/scored_steps": metrics["steps"],
+                }
+            )
+            wandb.finish()
         print_eval_metrics(metrics)
 
 
