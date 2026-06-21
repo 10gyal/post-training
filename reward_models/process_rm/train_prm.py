@@ -90,8 +90,6 @@ def prepare_prm_dataset(
         prompt = f"Problem: {prompt}\nReasoning trace:\n"
         prompt_ids = tokenizer(prompt, add_special_tokens=False)["input_ids"]
 
-        print("prompt:", prompt)
-
         # Chunk very long traces to avoid OOM
         for start in range(0, len(steps), max_steps_per_sample):
             if len(records) == limit:
