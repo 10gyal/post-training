@@ -33,11 +33,11 @@ console = Console()
 
 BASE_MODEL = "Qwen/Qwen3-0.6B-Base"
 DATASET_NAME = "trl-lib/prm800k"  # clean preprocessed version of openai/prm800k
-DEFAULT_SAMPLES = 1000
+DEFAULT_SAMPLES = 2000
 STEP_SEPARATOR = "\n<step>\n"
 PRM_CLASS_VALUES = [False, True]  # Bad, Good
 PRM_CLASS_TO_IDX = {value: idx for idx, value in enumerate(PRM_CLASS_VALUES)}
-TEST_SAMPLES = 10
+TEST_SAMPLES = 1000
 
 # hyperparameters
 DEFAULT_MAX_STEPS = 20
@@ -230,9 +230,9 @@ def train_prm(
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     log_every = max(1, log_every)
 
-    wandb = None
+    wandb_run = None
     if wandb_online:
-        wandb.init(
+        wandb_run = wandb.init(
             project=wandb_project,
             mode="online",
             config={
@@ -345,8 +345,8 @@ def train_prm(
                     display_loss = avg_loss
                     display_acc = acc
 
-                    if wandb is not None and global_step % log_every == 0:
-                        wandb.log(
+                    if wandb_run is not None and global_step % log_every == 0:
+                        wandb_run.log(
                             {
                                 "train/loss": avg_loss,
                                 "train/accuracy": acc,
@@ -372,8 +372,8 @@ def train_prm(
                     lr=f"{optimizer.param_groups[0]['lr']:.2e}",
                 )
 
-    if wandb is not None and finish_wandb:
-        wandb.finish()
+    if wandb_run is not None and finish_wandb:
+        wandb_run.finish()
 
     return model, tokenizer
 
@@ -391,7 +391,6 @@ def eval_prm(
 
     if len(eval_ds) == 0:
         return {
-            "loss": float("nan"),
             "accuracy": float("nan"),
             "steps": 0.0,
         }
@@ -404,10 +403,8 @@ def eval_prm(
         collate_fn=lambda b: collate_fn(b, tokenizer),
     )
 
-    total_loss = 0.0
     total_correct = 0
     total_steps = 0
-    total_batches = 0
 
     model.eval()
     with torch.no_grad():
@@ -416,7 +413,6 @@ def eval_prm(
             BarColumn(),
             TaskProgressColumn(),
             TimeElapsedColumn(),
-            TextColumn("loss={task.fields[loss]}"),
             TextColumn("acc={task.fields[acc]}"),
             TextColumn("steps={task.fields[steps]}"),
             console=console,
@@ -424,32 +420,30 @@ def eval_prm(
             task = progress.add_task(
                 f"Eval {split}",
                 total=len(loader),
-                loss="n/a",
                 acc="n/a",
                 steps="0",
             )
 
             for batch in loader:
                 batch = {k: v.to(device) for k, v in batch.items()}
-                loss, logits = model(**batch)
+                _, logits = model(
+                    input_ids=batch["input_ids"],
+                    attention_mask=batch["attention_mask"],
+                )
                 mask = batch["labels"] != -100
                 preds = logits[mask].argmax(dim=-1)
 
-                total_loss += loss.detach().float().item()
                 total_correct += (preds == batch["labels"][mask]).sum().item()
                 total_steps += mask.sum().item()
-                total_batches += 1
 
                 progress.update(
                     task,
                     advance=1,
-                    loss=f"{total_loss / max(1, total_batches):.4f}",
                     acc=f"{total_correct / max(1, total_steps):.3f}",
                     steps=str(total_steps),
                 )
 
     return {
-        "loss": total_loss / max(1, total_batches),
         "accuracy": total_correct / max(1, total_steps),
         "steps": float(total_steps),
     }
@@ -463,11 +457,9 @@ def print_eval_metrics(metrics: dict[str, float]) -> None:
     accuracy = metrics["accuracy"]
     if accuracy == accuracy:
         table.add_row("Step accuracy", f"[bold green]{accuracy:.2%}[/bold green]")
-        table.add_row("Mean loss", f"{metrics['loss']:.4f}")
         table.add_row("Scored steps", f"{metrics['steps']:.0f}")
     else:
         table.add_row("Step accuracy", "[bold yellow]n/a[/bold yellow]")
-        table.add_row("Mean loss", "nan")
         table.add_row("Scored steps", "0")
 
     console.print()
@@ -590,9 +582,9 @@ def demo_scoring(
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train and evaluate a process RM.")
     parser.add_argument(
-        "--eval",
+        "--evalonly",
         action="store_true",
-        help="Run aggregate step-token eval after training.",
+        help="Run aggregate step-token eval without training.",
     )
     parser.add_argument(
         "--wandb-project",
@@ -615,32 +607,55 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def log_eval_metrics(metrics: dict[str, float]) -> None:
+    wandb.log(
+        {
+            "eval/accuracy": metrics["accuracy"],
+            "eval/step_accuracy": metrics["accuracy"],
+            "eval/scored_steps": metrics["steps"],
+        }
+    )
+
+
 def main() -> None:
     args = parse_args()
 
     if args.wandb_online:
         wandb.login()
 
+    if args.evalonly:
+        if args.wandb_online:
+            wandb.init(
+                project=args.wandb_project,
+                mode="online",
+                config={
+                    "base_model": BASE_MODEL,
+                    "dataset_name": DATASET_NAME,
+                    "eval_only": True,
+                },
+            )
+
+        tokenizer = load_tokenizer(BASE_MODEL)
+        model = ProcessRewardModel(model_name=BASE_MODEL)
+        metrics = eval_prm(model, tokenizer)
+        if args.wandb_online:
+            log_eval_metrics(metrics)
+            wandb.finish()
+        print_eval_metrics(metrics)
+        return
+
     model, tokenizer = train_prm(
         wandb_project=args.wandb_project,
         wandb_online=args.wandb_online,
         log_every=max(1, args.log_every),
-        finish_wandb=not args.eval,
+        finish_wandb=False,
     )
 
-    if args.eval:
-        metrics = eval_prm(model, tokenizer)
-        if args.wandb_online:
-            wandb.log(
-                {
-                    "eval/loss": metrics["loss"],
-                    "eval/accuracy": metrics["accuracy"],
-                    "eval/step_accuracy": metrics["accuracy"],
-                    "eval/scored_steps": metrics["steps"],
-                }
-            )
-            wandb.finish()
-        print_eval_metrics(metrics)
+    metrics = eval_prm(model, tokenizer)
+    if args.wandb_online:
+        log_eval_metrics(metrics)
+        wandb.finish()
+    print_eval_metrics(metrics)
 
 
 if __name__ == "__main__":
