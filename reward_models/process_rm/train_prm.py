@@ -33,7 +33,7 @@ console = Console()
 
 BASE_MODEL = "Qwen/Qwen3-0.6B-Base"
 DATASET_NAME = "trl-lib/prm800k"  # clean preprocessed version of openai/prm800k
-DEFAULT_SAMPLES = 2000
+DEFAULT_SAMPLES = 5000
 STEP_SEPARATOR = "\n<step>\n"
 PRM_CLASS_VALUES = [False, True]  # Bad, Good
 PRM_CLASS_TO_IDX = {value: idx for idx, value in enumerate(PRM_CLASS_VALUES)}
@@ -41,7 +41,7 @@ TEST_SAMPLES = 1000
 
 # hyperparameters
 DEFAULT_MAX_STEPS = 20
-DEFAULT_MAX_TOKENS = 5500
+DEFAULT_MAX_TOKENS = 4096
 DEFAULT_BATCH_SIZE = 2
 DEFAULT_LR = 2e-5
 DEFAULT_GRAD_ACCUM_STEPS = 8
