@@ -80,7 +80,7 @@ def prepare_prm_dataset(
     len_sep_token_ids = len(sep_token_ids)
 
     records = []
-    for sample in stream:
+    for prompt_id, sample in enumerate(stream):
         if len(records) == limit:
             break
         prompt = sample.get("prompt", "")
@@ -135,6 +135,8 @@ def prepare_prm_dataset(
                     "input_ids": input_ids,
                     "attention_mask": attention_mask,
                     "labels": label_ids,
+                    "prompt_id": prompt_id,
+                    "chunk_start": start,
                     "prompt": prompt,
                     "steps": chunk_steps,
                     "step_labels": step_label_values,
@@ -159,6 +161,10 @@ def collate_fn(batch, tokenizer: AutoTokenizer, include_metadata: bool = False):
     result = {"input_ids": inputs, "attention_mask": attn, "labels": labels}
 
     if include_metadata:
+        result["prompt_ids"] = [
+            item.get("prompt_id", idx) for idx, item in enumerate(batch)
+        ]
+        result["chunk_starts"] = [item.get("chunk_start", 0) for item in batch]
         result["prompts"] = [item.get("prompt", "") for item in batch]
         result["steps"] = [item.get("steps", []) for item in batch]
         result["step_labels"] = [item.get("step_labels", []) for item in batch]
@@ -394,6 +400,7 @@ def eval_prm(
             "accuracy": float("nan"),
             "balanced_accuracy": float("nan"),
             "majority_baseline": float("nan"),
+            "prompt_exact_match": float("nan"),
             "steps": 0.0,
             "target_bad": 0.0,
             "target_good": 0.0,
@@ -408,7 +415,7 @@ def eval_prm(
         batch_size=batch_size,
         shuffle=False,
         drop_last=False,
-        collate_fn=lambda b: collate_fn(b, tokenizer),
+        collate_fn=lambda b: collate_fn(b, tokenizer, include_metadata=True),
     )
 
     total_correct = 0
@@ -416,6 +423,7 @@ def eval_prm(
     target_counts = torch.zeros(len(PRM_CLASS_VALUES), dtype=torch.long)
     pred_counts = torch.zeros(len(PRM_CLASS_VALUES), dtype=torch.long)
     correct_counts = torch.zeros(len(PRM_CLASS_VALUES), dtype=torch.long)
+    prompt_exact = {}
 
     model.eval()
     with torch.no_grad():
@@ -436,13 +444,17 @@ def eval_prm(
             )
 
             for batch in loader:
-                batch = {k: v.to(device) for k, v in batch.items()}
+                tensor_batch = {
+                    key: value.to(device)
+                    for key, value in batch.items()
+                    if torch.is_tensor(value)
+                }
                 _, logits = model(
-                    input_ids=batch["input_ids"],
-                    attention_mask=batch["attention_mask"],
+                    input_ids=tensor_batch["input_ids"],
+                    attention_mask=tensor_batch["attention_mask"],
                 )
-                mask = batch["labels"] != -100
-                targets = batch["labels"][mask]
+                mask = tensor_batch["labels"] != -100
+                targets = tensor_batch["labels"][mask]
                 preds = logits[mask].argmax(dim=-1)
 
                 correct_mask = preds == targets
@@ -458,6 +470,20 @@ def eval_prm(
                     targets[correct_mask].detach().cpu(),
                     minlength=len(PRM_CLASS_VALUES),
                 )
+
+                row_preds = logits.argmax(dim=-1)
+                for row_idx, prompt_id in enumerate(batch["prompt_ids"]):
+                    row_mask = mask[row_idx]
+                    if not row_mask.any():
+                        continue
+                    row_correct = (
+                        row_preds[row_idx][row_mask]
+                        == tensor_batch["labels"][row_idx][row_mask]
+                    )
+                    chunk_exact = bool(row_correct.all().item())
+                    prompt_exact[prompt_id] = (
+                        prompt_exact.get(prompt_id, True) and chunk_exact
+                    )
 
                 progress.update(
                     task,
@@ -475,11 +501,15 @@ def eval_prm(
     )
     balanced_accuracy = class_accuracies[present_classes].mean().item()
     majority_baseline = target_counts.max().item() / max(1, total_steps)
+    prompt_exact_match = (
+        sum(prompt_exact.values()) / len(prompt_exact) if prompt_exact else float("nan")
+    )
 
     return {
         "accuracy": total_correct / max(1, total_steps),
         "balanced_accuracy": balanced_accuracy,
         "majority_baseline": majority_baseline,
+        "prompt_exact_match": prompt_exact_match,
         "steps": float(total_steps),
         "target_bad": float(target_counts[PRM_CLASS_TO_IDX[False]].item()),
         "target_good": float(target_counts[PRM_CLASS_TO_IDX[True]].item()),
@@ -500,6 +530,7 @@ def print_eval_metrics(metrics: dict[str, float]) -> None:
         table.add_row("Step accuracy", f"[bold green]{accuracy:.2%}[/bold green]")
         table.add_row("Balanced accuracy", f"{metrics['balanced_accuracy']:.2%}")
         table.add_row("Majority baseline", f"{metrics['majority_baseline']:.2%}")
+        table.add_row("Prompt exact match", f"{metrics['prompt_exact_match']:.2%}")
         table.add_row("Scored steps", f"{metrics['steps']:.0f}")
         table.add_row(
             "Targets bad/good",
@@ -515,6 +546,7 @@ def print_eval_metrics(metrics: dict[str, float]) -> None:
         table.add_row("Step accuracy", "[bold yellow]n/a[/bold yellow]")
         table.add_row("Balanced accuracy", "nan")
         table.add_row("Majority baseline", "nan")
+        table.add_row("Prompt exact match", "nan")
         table.add_row("Scored steps", "0")
         table.add_row("Targets bad/good", "0 / 0")
         table.add_row("Preds bad/good", "0 / 0")
@@ -673,6 +705,7 @@ def log_eval_metrics(metrics: dict[str, float]) -> None:
             "eval/step_accuracy": metrics["accuracy"],
             "eval/balanced_accuracy": metrics["balanced_accuracy"],
             "eval/majority_baseline": metrics["majority_baseline"],
+            "eval/prompt_exact_match": metrics["prompt_exact_match"],
             "eval/scored_steps": metrics["steps"],
             "eval/target_bad": metrics["target_bad"],
             "eval/target_good": metrics["target_good"],
