@@ -53,6 +53,21 @@ DEFAULT_WANDB_ONLINE = True
 DEFAULT_LOG_EVERY = 1
 
 
+def seed_everything(seed: int) -> None:
+    random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+        torch.backends.cudnn.benchmark = False
+        torch.backends.cudnn.deterministic = True
+
+
+def make_generator(seed: int, device: torch.device | str = "cpu") -> torch.Generator:
+    generator = torch.Generator(device=device)
+    generator.manual_seed(seed)
+    return generator
+
+
 def load_tokenizer(model_id: str) -> AutoTokenizer:
     """Load tokenizer with proper padding setup."""
     tokenizer = AutoTokenizer.from_pretrained(model_id, use_fast=True)
@@ -231,8 +246,7 @@ def train_prm(
     log_every: int = DEFAULT_LOG_EVERY,
     finish_wandb: bool = True,
 ) -> tuple[ProcessRewardModel, AutoTokenizer]:
-    random.seed(seed)
-    torch.manual_seed(seed)
+    seed_everything(seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     log_every = max(1, log_every)
 
@@ -260,12 +274,14 @@ def train_prm(
     tokenizer = load_tokenizer(base_model)
 
     data = prepare_prm_dataset(dataset_name, tokenizer, "train", samples)
+    train_generator = make_generator(seed)
 
     loader = DataLoader(
         data,
         batch_size=batch_size,
         shuffle=True,
         drop_last=len(data) > batch_size,
+        generator=train_generator,
         collate_fn=lambda b: collate_fn(b, tokenizer),
     )
 
@@ -566,7 +582,7 @@ def demo_scoring(
     dataset_name: str = DATASET_NAME,
 ) -> list[dict[str, object]]:
     device = next(model.parameters()).device
-    random.seed(seed)
+    seed_everything(seed)
 
     test_ds = prepare_prm_dataset(dataset_name, tokenizer, "test", limit)
 
@@ -574,15 +590,12 @@ def demo_scoring(
         console.print("[bold yellow]No test samples were prepared.[/bold yellow]")
         return []
 
-    generator = torch.Generator()
-    generator.manual_seed(seed)
-
     loader = DataLoader(
         test_ds,
         batch_size=batch_size,
         shuffle=True,
         drop_last=False,
-        generator=generator,
+        generator=make_generator(seed),
         collate_fn=lambda b: collate_fn(b, tokenizer, include_metadata=True),
     )
 
@@ -694,6 +707,12 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_LOG_EVERY,
         help="Log every N optimizer steps.",
     )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=DEFAULT_SEED,
+        help="Random seed for model initialization and shuffled loaders.",
+    )
 
     return parser.parse_args()
 
@@ -724,6 +743,7 @@ def main() -> None:
         wandb.login()
 
     if args.evalonly:
+        seed_everything(args.seed)
         if args.wandb_online:
             wandb.init(
                 project=args.wandb_project,
@@ -732,6 +752,7 @@ def main() -> None:
                     "base_model": BASE_MODEL,
                     "dataset_name": DATASET_NAME,
                     "eval_only": True,
+                    "seed": args.seed,
                 },
             )
 
@@ -749,6 +770,7 @@ def main() -> None:
         wandb_project=args.wandb_project,
         wandb_online=args.wandb_online,
         log_every=max(1, args.log_every),
+        seed=args.seed,
         finish_wandb=False,
     )
 
